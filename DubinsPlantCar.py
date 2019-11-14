@@ -55,7 +55,8 @@ def DubinsCarPlant_(T):
 			#Vehicle acceleration, unloaded 0.8 m/s2
 			#Vehicle deceleration, unloaded 1.6 m/s2
 			#Steer slew rate 60 deg / sec 
-			p1 = itertools.product([-0.5,0.5], repeat=3)
+			p1 = itertools.product([-0.5,0.0,0.5], repeat=3)
+			#p1 = itertools.product([-0.5,0.5], repeat=3)
 			self.pxi = []
 			for p in p1:
 				self.pxi.append(p)
@@ -87,7 +88,7 @@ def DubinsCarPlant_(T):
 			#import pdb; pdb.set_trace() #(xf-x0)
 			#N = 5#8 # constant
 			#N = np.int(tf0 * 10) # "10Hz" / samples per second
-			N = 4 #4 #8 #4 #31 #12
+			N = 5 #4 #8 #4 #31 #12
 			#print('N=%d' %(N) )
 			context = self.CreateDefaultContext()
 			dircol  = DirectCollocation(self, context, num_time_samples=N,
@@ -108,6 +109,8 @@ def DubinsCarPlant_(T):
 			# this causes problems with RealContinuousLyapunovEquation
 			#dircol.AddLinearEqualityConstraint(final_u_decision_var, 0.0) 
 			first_u_decision_var = dv[self.nX*N + 1 ] #u[t_0]
+			dircol.AddLinearEqualityConstraint(first_u_decision_var, 0.0)
+			first_u_decision_var = dv[self.nX*N + 0 ] #u[t_0]
 			dircol.AddLinearEqualityConstraint(first_u_decision_var, 0.0)
 			
 			# set some constraints on start and final pose
@@ -573,19 +576,15 @@ def DubinsCarPlant_(T):
 		# from the paper "Invariant Funnels around Trajectories using Sum-of-Squares Programming", Tobenkin et al.
 		def TimeVaryingLyapunovSearchRho(self, prev_x, Vs_orig, Vdots_orig, Ts, all_fcl, all_K, times, xtraj, utraj, \
 										 rho_f, multiplier_degree=None, debug=True, find_V=False):
-			C = 5.0 #8.0
+			C     = 5.0 #8.0
 			tries = 100 #40
 			deg_V = 2
 			eps   = 1e-4
 			prev_rhointegral = 0.
-			N = len(times)-1
+			N  = len(times)-1
 			dt = np.diff(times)
-			rho = np.flipud(rho_f*np.exp(-C*(np.array(times)-times[0])/(times[-1]-times[0])))# + np.max(Vmin) 
-			#rho = np.linspace(0.1, rho_f, N+1)
-			#rho = np.linspace(rho_f/2.0, rho_f, N+1)
-			#rho = np.linspace(rho_f, rho_f, N+1)
-			#import pdb; pdb.set_trace()
-			#import pdb; pdb.set_trace()
+			#rho = np.flipud(rho_f*np.exp(-C*(np.array(times)-times[0])/(times[-1]-times[0])))# + np.max(Vmin) 
+			rho   = np.linspace(rho_f, rho_f, N+1)
 			Vs    = list(Vs_orig)
 			Vdots = list(Vdots_orig)
 			
@@ -610,32 +609,27 @@ def DubinsCarPlant_(T):
 				rhodot = np.append(rhodot, 0.0) #for last knot point
 				Lambda_vec = [] # store the lamda's for this iteration
 				Lambda_e_vec = [] # store the lamda's for this iteration
-				Sk_vec = []
+				Sk_vec     = []
 				x_vec      = [] # store the prog indeterminates 
+				Lambda_u   = []
 				
-				Lambda_u    = []
 				#fix rho and V, optimize Lagrange multipliers
-				for i in range(N+1): #+1
+				for i in range(N+1): 
 					prog = MathematicalProgram()
 					y    = prog.NewIndeterminates(len(prev_x),'y')
 					# because I'm switching the prev_x from previous iteration to be consistent
 					V    = Vs[i].Substitute(dict(zip(prev_x, y)))
 					Vdot = Vdots[i].Substitute(dict(zip(prev_x, y)))
-					#import pdb; pdb.set_trace()
-					ui = utraj.value(times[i]).transpose()[0]
-					Ki = all_K[i]
-					#if(vdmin > rhodot[i]):
-					#	print('Vdot is greater than rhodot!')
+					ui   = utraj.value(times[i]).transpose()[0]
+					Ki   = all_K[i]
 					
-					if(i == 0):
-						Lambda = prog.NewSosPolynomial(Variables(y), multiplier_degree)[0].ToExpression()
-					else:
-						Lambda = prog.NewFreePolynomial(Variables(y), multiplier_degree).ToExpression()
+					Lambda = prog.NewFreePolynomial(Variables(y), multiplier_degree).ToExpression()
 					
 					#Sk     = prog.NewSosPolynomial(Variables(y), deg_V)[0].ToExpression() 
 					Sk = prog.NewSymmetricContinuousVariables(self.nX) #so there are no free and linear terms
-					Sk = y.dot(Sk).dot(y)
-					#import pdb; pdb.set_trace()
+					prog.AddPositiveSemidefiniteConstraint(Sk)
+
+					# for the SOS constraint to create an ellipsoid equivalent to V: {x|x'Sx < 1}
 					Lambda_e   = prog.NewSosPolynomial(Variables(y), multiplier_degree)[0].ToExpression() 
 					
 					## actuation limits
@@ -655,19 +649,20 @@ def DubinsCarPlant_(T):
 					#prog.AddSosConstraint( V - eps*y.dot(y) ) 
 					# Jdot-rhodot+Lambda*(rho-J) < -gamma
 					#prog.AddSosConstraint( -eps*y.dot(y) - (Vdot - rhodot[i] + Lambda*(rho[i]-V)) ) #-gamma*V
-					prog.AddSosConstraint(1.0 - Sk + Lambda_e*(V-rho[i]) )
+					prog.AddSosConstraint(1.0 - y.dot(Sk).dot(y) + Lambda_e*(V-rho[i]) )
 					#import pdb; pdb.set_trace()
 					prog.AddSosConstraint( -Vdot + rhodot[i] + Lambda*(V-rho[i]) + Lambda_u[i]) 
 					#prog.AddCost(-gamma) #maximize gamma
-					a = 0.5*Jacobian(Sk.Jacobian(y),y)
+					#a = 0.5*Jacobian(Sk.Jacobian(y),y)
 					if(i == 0):
+						# makes sure we are encapsulating the unit cube for initial condition
 						for pt in self.pxi:
-							prog.AddConstraint( pt.T.dot(a).dot(pt) <= 1.0)
+							if not all(pt==0.0):
+								prog.AddConstraint( pt.T.dot(Sk).dot(pt) <= 1.0)
 							
-					prog.AddMaximizeLogDeterminantSymmetricMatrixCost(a)
+					prog.AddMaximizeLogDeterminantSymmetricMatrixCost(Sk)
 					result = Solve(prog)
 					#print('i=%d' %(i))
-					#import pdb; pdb.set_trace()
 					if result.is_success() == False:
 						need_to_break = True
 						print('Solver could not solve anymore (%d)' %(i))
@@ -703,20 +698,23 @@ def DubinsCarPlant_(T):
 				ellipsoid_vol = 0.0
 				progV = MathematicalProgram()
 				z     = progV.NewIndeterminates(len(prev_x),'z')
-				rho_x     = progV.NewContinuousVariables(N+1,'r')
-				#rho_x    = np.concatenate((t,[rho[-1]])) #+ rho 
-				#import pdb; pdb.set_trace()
-				progV.SetInitialGuess(rho_x, rho)
+				rho_x = progV.NewContinuousVariables(N+1,'r')
+				convergence_factor = 0.05 # think about this one!!!
+				for cnt,r in enumerate(rho_x):
+					progV.AddConstraint(r >= 0.0) #it has to be positive
+					if(cnt == N):
+						pass
+						#progV.AddConstraint(rho_x[-1] >= rho[-1]) #just to try to keep it on the same scale
+					else:
+						progV.AddConstraint(rho_x[cnt] - rho_x[cnt+1] >= convergence_factor ) #eps
+				#rho_x = np.concatenate((t,[rho[-1]])) #+ rho 
+				#progV.SetInitialGuess(rho_x, rho)
 				#rho_x    = rho # for debug
 				V        = list(Vs)
 				Vdot     = list(Vdots)
 				#V[-1]    = V[-1].Substitute(dict(zip(prev_x, z)))
 				#Vdot[-1] = Vdot[-1].Substitute(dict(zip(prev_x, z)))
-				#QFQFQF = Evaluate(0.5*Jacobian(V[-1].Jacobian(z),z), dict(zip(z, np.zeros(self.nX))))
 				
-				#x_add    = 1.0 #np.ones(self.nX)
-				#xf       = xtraj.value(times[-1]).transpose()[0]
-				#scale_V  = V[-1].Evaluate(dict(zip(z, 0.0*xf+x_add)))
 				#import pdb; pdb.set_trace()
 				# loop over the whole trajectory to find the integral. go backwards to get dV/dt
 				for i in reversed(range(N+1)): # range(N-1, -1, -1):  #
@@ -738,16 +736,19 @@ def DubinsCarPlant_(T):
 						if True:
 							# Construct a polynomial V that contains all monomials with x,y,theta up to degree 2
 							# run over the previous, except the last V, and make a decision-variable of coeff.
-							V[i] = progV.NewSosPolynomial(Variables(z), deg_V)[0].ToExpression() 
-							newVars = progV.decision_variables()[-10::]
+							mV = progV.NewSymmetricContinuousVariables(self.nX)
+							progV.AddPositiveSemidefiniteConstraint(mV)
+							V[i] = z.dot(mV).dot(z)
+							#V[i] = progV.NewSosPolynomial(Variables(z), deg_V)[0].ToExpression() 
+							#newVars = progV.decision_variables()[-10::]
 							#import pdb; pdb.set_trace()
-							oldVals = self.GetCoeefs(Vs[i], prev_x)
-							progV.SetInitialGuess(newVars, oldVals.flatten())
+							#oldVals = self.GetCoeefs(Vs[i], prev_x)
+							#progV.SetInitialGuess(newVars, oldVals.flatten())
 							Sk = progV.NewSymmetricContinuousVariables(self.nX) #so there are no free and linear terms
-							Sk = z.dot(Sk).dot(z)
-							newVars = progV.decision_variables()[-10::]
-							oldVals = self.GetCoeefs(Sk_vec[i], x_vec[i])
-							progV.SetInitialGuess(newVars, oldVals.flatten())
+							progV.AddPositiveSemidefiniteConstraint(Sk)
+							#newVars = progV.decision_variables()[-6::]
+							#oldVals = self.GetCoeefs(Sk_vec[i], x_vec[i])
+							#progV.SetInitialGuess(newVars, Sk_vec[i].flatten())
 														
 							Lambda_e   = Lambda_e_vec[i].Substitute(dict(zip(x_vec[i], z))) 
 							# let him find the minimum value location. why else is it an optimizer??!
@@ -762,7 +763,7 @@ def DubinsCarPlant_(T):
 							#constraint2 = progV.AddLinearConstraint( V[i].Substitute(dict(zip(z, 0.0*x0)) ) == eps)
 							# make all V's in the "scaling" of the last V
 							x_add = np.ones(self.nX) #np.random.rand(3)-0.5
-							#x_add[2] = 0 # because this is the theta state, and there's wrap around and stuff
+							x_add[2] = 0 # because this is the theta state, and there's wrap around and stuff
 							#scale_V  = Vs_orig[-1].Evaluate(dict(zip(prev_x, 0.0*xf+x_add))) #Vs
 							scale_V  = Vs_orig[i].Evaluate(dict(zip(prev_x, 0.0*x0+x_add))) #Vs
 							#scale_V = 1.0
@@ -772,30 +773,28 @@ def DubinsCarPlant_(T):
 							#scale_V  = Vs[i].Evaluate(dict(zip(prev_x, 0.0*xf+x_add)))
 							#constraint4 = progV.AddLinearConstraint(
 							#	V[i].Substitute(dict(zip(z, 0.0*x0))) <= eps) #helps it start at V(0)=0
-							constraint1 = progV.AddSosConstraint(1.0 - Sk + Lambda_e*(V[i]-rho_x[i]) )
-							a = 0.5*Jacobian(Sk.Jacobian(z),z)
+							constraint1 = progV.AddSosConstraint(1.0 - z.dot(Sk).dot(z) + Lambda_e*(V[i]-rho_x[i]) )
+							#a = 0.5*Jacobian(Sk.Jacobian(z),z)
 							if(i == 0):
 								for pt in self.pxi:
-									progV.AddConstraint( pt.T.dot(a).dot(pt) <= 1.0)
-							progV.AddMaximizeLogDeterminantSymmetricMatrixCost(a)
+									if not all(pt==0.0):
+										progV.AddConstraint( pt.T.dot(Sk).dot(pt) <= 1.0)
+
 						else:
 							#for debug
 							V[i]    = V[i].Substitute(dict(zip(prev_x, z))) # for debugging
 							Vdot[i] = Vdot[i].Substitute(dict(zip(prev_x, z))) # for debugging
 
-						#Vs_orig[i].Substitute(dict(zip(prev_x, 0.0*x0 + x_add)))  )
-
+						# the common stuff
 						L1   = Lambda_vec[i].Substitute(dict(zip(x_vec[i], z)))
 						#import pdb; pdb.set_trace()
 						Lambda_u[i] = Lambda_u[i].Substitute(dict(zip(x_vec[i], z)))
 						#Vdot = Vdot*rho_x[i] - V*rhod_x
 						progV.AddSosConstraint( -Vdot[i] + rhod_x + L1 * (V[i]-rho_x[i]) + Lambda_u[i] )
 						#import pdb; pdb.set_trace()
-						#'''
-						a = 0.5*Jacobian(V[i].Jacobian(z),z) #/ rho_x[i]
-						ellipsoid_vol = ellipsoid_vol + self.EllipsoidVolume(a, rho_x[i])
-						#progV.AddMaximizeLogDeterminantSymmetricMatrixCost(a)
-						#'''
+						#a = 0.5*Jacobian(V[i].Jacobian(z),z) #/ rho_x[i]
+						ellipsoid_vol = ellipsoid_vol + self.EllipsoidVolume(Sk, 1.0) #a, rho_x[i])
+						progV.AddMaximizeLogDeterminantSymmetricMatrixCost(Sk)
 					else:
 						# use the V provided by the LQR routine
 						V    = Vs[i].Substitute(dict(zip(prev_x, z)))
@@ -807,9 +806,8 @@ def DubinsCarPlant_(T):
 						progV.AddSosConstraint( -Vdot + rhod_x + L1 * ( V-rho_x[i] ) + Lambda_u[i] )
 						a = 0.5*Jacobian(V.Jacobian(z),z) #/ rho_x[i]
 						ellipsoid_vol = ellipsoid_vol + self.EllipsoidVolume(a, rho_x[i])
+						progV.AddCost(-rhointegral)
 				
-				if(find_V == False):
-					progV.AddCost(-rhointegral)
 				#import pdb; pdb.set_trace()
 				result = Solve(progV)
 				if (result.is_success() == True):
@@ -829,10 +827,10 @@ def DubinsCarPlant_(T):
 							#	f_cl[j] = all_fcl[i][j].Substitute(dict(zip(prev_x, z)))
 							Vdots[i] = Vs[i].Jacobian(prev_x).dot(f_cl) + (Vs[i+1]-Vs[i])/dt[i] #Vsoldot
 							#Vdots[i] = Vsoldot.Substitute(dict(zip(z, prev_x)))
-						
+					#import pdb; pdb.set_trace()	
 					rho = []
 					for r in rhos:
-						rho.append(r[0].Evaluate())
+						rho.append(r) #[0].Evaluate())
 				
 					rhointegral = result.GetSolution(rhointegral).Evaluate()
 					if( np.abs(rhointegral-prev_rhointegral)/rhointegral < 1E-5): # 0.1%
